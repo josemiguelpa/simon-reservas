@@ -4,7 +4,7 @@ export function parseArgs(argv) {
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index];
 
-    if (["--confirm", "--headed", "--help", "--list"].includes(token)) {
+    if (["--confirm", "--headed", "--help", "--list", "--logs"].includes(token)) {
       result[token.slice(2)] = true;
       continue;
     }
