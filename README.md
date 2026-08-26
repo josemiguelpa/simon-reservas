@@ -77,7 +77,7 @@ pnpm start -- \
 
 ## Tareas semanales
 
-El programador debe permanecer en ejecución. No necesita cron ni dependencias adicionales: comprueba una vez por minuto las tareas configuradas y conserva estado local para no repetir una ejecución tras reiniciarse.
+El programador debe permanecer en ejecución. No necesita cron ni dependencias adicionales: detecta el minuto configurado y conserva estado local para no repetir una ejecución tras reiniciarse.
 
 Crea una tarea con el asistente de línea de comandos:
 
@@ -105,11 +105,27 @@ pnpm schedule -- --list
 # Ejecutar una tarea ahora, conservando su modo simulación/real
 pnpm schedule -- --run-now voley-sabado
 
+# Ver las últimas 20 ejecuciones
+pnpm schedule -- --logs
+
+# Filtrar una tarea y ampliar el resultado
+pnpm schedule -- --logs --task voley-sabado --limit 50
+
 # Mantener activo el programador
 pnpm schedule
 ```
 
 El archivo generado es `config/schedules.json`. También puedes copiar y editar `config/schedules.example.json`. Para dejar el proceso permanente en Linux, adapta `deploy/simon-reservas.service.example` y actívalo como servicio de usuario o del sistema.
+
+### Historial de ejecuciones
+
+Cada intento se registra en `.state/scheduler-runs.jsonl` con su tarea, fecha objetivo, modo, duración y resultado. `EXITOSA` significa que el proceso terminó con código 0; `FALLIDA` incluye el mensaje y código de salida; `INTERRUMPIDA` indica que se registró el inicio pero el proceso se cerró antes de guardar un resultado final. El log no incluye credenciales ni cédulas.
+
+Cuando se utiliza el servicio systemd, la salida en vivo también puede consultarse con:
+
+```bash
+journalctl -u simon-reservas -f
+```
 
 ## Verificación
 
