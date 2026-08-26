@@ -1,0 +1,17 @@
+{
+  "name": "simon-reservas",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Automatización segura de reservas en SIMON 2.0 INDER mediante Playwright.",
+  "scripts": {
+    "start": "node src/cli.mjs",
+    "check": "node --check src/cli.mjs && node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "playwright": ">=1.52.0 <2"
+  }
+}
