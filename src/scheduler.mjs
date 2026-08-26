@@ -1,10 +1,12 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 import { loadEnvFile } from "./env.mjs";
+import { appendRunEvent, buildRunHistory, readRunEvents } from "./run-log.mjs";
 import { nextWeekdayIso, taskMatchesDate, validateScheduleTask, zonedDateParts } from "./schedule-utils.mjs";
 import { parseArgs } from "./utils.mjs";
 
@@ -35,20 +37,73 @@ function reservationArguments(task, targetDate) {
   return args;
 }
 
-async function runTask(task, timezone, now = new Date()) {
+async function runTask(task, timezone, logPath, now = new Date()) {
   const targetDate = nextWeekdayIso(now, timezone, task.reservation.targetWeekday, task.reservation.weeksAhead);
-  console.log(`[${new Date().toISOString()}] Ejecutando ${task.id} para ${targetDate}.`);
+  const startedAt = new Date();
+  const runId = randomUUID();
+  const mode = task.reservation.confirm ? "real" : "simulation";
+  const baseEvent = { runId, taskId: task.id, targetDate, mode, startedAt: startedAt.toISOString() };
+  appendRunEvent(logPath, { ...baseEvent, status: "started" });
+  console.log(`[${startedAt.toISOString()}] Ejecutando ${task.id} para ${targetDate}.`);
 
-  const exitCode = await new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, reservationArguments(task, targetDate), {
-      cwd: PROJECT_ROOT,
-      env: process.env,
-      stdio: "inherit",
+  try {
+    const exitCode = await new Promise((resolve, reject) => {
+      const child = spawn(process.execPath, reservationArguments(task, targetDate), {
+        cwd: PROJECT_ROOT,
+        env: process.env,
+        stdio: "inherit",
+      });
+      child.once("error", reject);
+      child.once("exit", (code) => resolve(code ?? 1));
     });
-    child.once("error", reject);
-    child.once("exit", (code) => resolve(code ?? 1));
-  });
-  if (exitCode !== 0) throw new Error(`La tarea ${task.id} terminó con código ${exitCode}.`);
+    if (exitCode !== 0) {
+      const error = new Error(`La tarea ${task.id} terminó con código ${exitCode}.`);
+      error.exitCode = exitCode;
+      throw error;
+    }
+
+    appendRunEvent(logPath, {
+      ...baseEvent,
+      status: "succeeded",
+      finishedAt: new Date().toISOString(),
+      durationMs: Date.now() - startedAt.valueOf(),
+      exitCode: 0,
+    });
+  } catch (error) {
+    appendRunEvent(logPath, {
+      ...baseEvent,
+      status: "failed",
+      finishedAt: new Date().toISOString(),
+      durationMs: Date.now() - startedAt.valueOf(),
+      exitCode: error.exitCode ?? null,
+      error: error.message,
+    });
+    throw error;
+  }
+}
+
+function printRunHistory(logPath, args) {
+  const limit = Number(args.limit || 20);
+  if (!Number.isInteger(limit) || limit < 1 || limit > 500) {
+    throw new Error("--limit debe ser un entero entre 1 y 500.");
+  }
+
+  const labels = { succeeded: "EXITOSA", failed: "FALLIDA", interrupted: "INTERRUMPIDA" };
+  const runs = buildRunHistory(readRunEvents(logPath), { taskId: args.task, limit });
+  if (!runs.length) {
+    console.log("No hay ejecuciones registradas.");
+    return;
+  }
+
+  console.table(runs.map((run) => ({
+    inicio: run.startedAt,
+    tarea: run.taskId,
+    estado: labels[run.status] || run.status,
+    objetivo: run.targetDate,
+    modo: run.mode === "real" ? "real" : "simulación",
+    duración: Number.isFinite(run.durationMs) ? `${Math.round(run.durationMs / 1000)}s` : "—",
+    detalle: run.error || "—",
+  })));
 }
 
 async function main() {
@@ -56,6 +111,10 @@ async function main() {
   const args = parseArgs(process.argv.slice(2));
   const configPath = path.resolve(PROJECT_ROOT, args.config || process.env.SIMON_SCHEDULES_FILE || "config/schedules.json");
   const statePath = path.resolve(PROJECT_ROOT, ".state/scheduler-state.json");
+  const logPath = path.resolve(PROJECT_ROOT, process.env.SIMON_SCHEDULER_LOG || ".state/scheduler-runs.jsonl");
+
+  if (args.logs) return printRunHistory(logPath, args);
+
   const config = readJson(configPath, null);
   if (!config) throw new Error(`No existe la configuración de tareas: ${configPath}`);
   if (!Array.isArray(config.tasks)) {
@@ -76,7 +135,7 @@ async function main() {
   if (args.runNow) {
     const task = enabledTasks.find((candidate) => candidate.id === args.runNow);
     if (!task) throw new Error(`No existe una tarea activa con id ${args.runNow}.`);
-    await runTask(task, timezone);
+    await runTask(task, timezone, logPath);
     return;
   }
 
@@ -98,7 +157,7 @@ async function main() {
         state.triggered[task.id] = key;
         writeState(statePath, state);
         try {
-          await runTask(task, timezone, now);
+          await runTask(task, timezone, logPath, now);
         } catch (error) {
           console.error(error.message);
         }
