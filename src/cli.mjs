@@ -1,7 +1,8 @@
 #!/usr/bin/env node
-import fs from "node:fs";
 import process from "node:process";
 import { chromium } from "playwright";
+import { loadEnvFile } from "./env.mjs";
+import { readParticipantCsv, selectParticipantDocuments } from "./participants.mjs";
 import {
   assertIsoDate,
   blocksCoveringRange,
@@ -14,24 +15,6 @@ const BASE_URL = "https://simon.inder.gov.co";
 const LOGIN_URL = `${BASE_URL}/login/`;
 const BOOKING_LIST_URL = `${BASE_URL}/apps/scenarios/booking/list/`;
 
-function loadEnvFile(path = ".env") {
-  if (!fs.existsSync(path)) return;
-
-  for (const rawLine of fs.readFileSync(path, "utf8").split(/\r?\n/)) {
-    const line = rawLine.trim();
-    if (!line || line.startsWith("#")) continue;
-    const separator = line.indexOf("=");
-    if (separator < 1) continue;
-
-    const key = line.slice(0, separator).trim();
-    let value = line.slice(separator + 1).trim();
-    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
-      value = value.slice(1, -1);
-    }
-    if (!(key in process.env)) process.env[key] = value;
-  }
-}
-
 function printHelp() {
   console.log(`
 Uso:
@@ -39,7 +22,8 @@ Uso:
     --date 2026-08-28 --start 18:00 --end 19:00 [opciones]
 
 Opciones:
-  --participants DOC1,DOC2  Agrega participantes registrados en SIMON.
+  --participants DOC1,DOC2  Reemplaza la selección automática del CSV.
+  --participants-csv RUTA   CSV cuya primera columna contiene las cédulas.
   --headed                  Muestra el navegador.
   --confirm                 Confirma la reserva real. Sin esto solo valida.
   --help                    Muestra esta ayuda.
@@ -178,12 +162,24 @@ async function addParticipant(page, documentNumber) {
   await dialog.waitFor({ state: "hidden", timeout: 10_000 });
 }
 
-async function verifyCapacity(page, addedParticipants) {
+async function readCapacity(page) {
   const fullText = await page.locator("main").innerText();
-  const minimum = /Usuarios minimos por reserva:\s*(\d+)/i.exec(fullText)?.[1];
-  if (minimum && 1 + addedParticipants < Number(minimum)) {
-    throw new Error(`Este escenario exige mínimo ${minimum} participantes; se configuraron ${1 + addedParticipants}.`);
-  }
+  return {
+    minimum: Number(/Usuarios minimos por reserva:\s*(\d+)/i.exec(fullText)?.[1] || 1),
+    maximum: Number(/Usuarios maximos por reserva:\s*(\d+)/i.exec(fullText)?.[1] || Number.POSITIVE_INFINITY),
+  };
+}
+
+function resolveParticipants(args, capacity) {
+  const csvPath = args.participantsCsv || process.env.SIMON_PARTICIPANTS_CSV || "./data/participants.csv";
+  const candidates = args.participants.length || capacity.minimum <= 1 ? [] : readParticipantCsv(csvPath);
+  return selectParticipantDocuments({
+    candidates,
+    explicit: args.participants,
+    ownerDocument: process.env.SIMON_DOCUMENT_NUMBER,
+    minimum: capacity.minimum,
+    maximum: capacity.maximum,
+  });
 }
 
 async function finalize(page) {
@@ -217,7 +213,11 @@ async function main() {
     await chooseAutocomplete(page, "Selecciona la división a reservar", args.division);
 
     const blocks = await inspectRequestedBlocks(page, args);
-    await verifyCapacity(page, args.participants.length);
+    const capacity = await readCapacity(page);
+    const participants = resolveParticipants(args, capacity);
+    if (participants.length) {
+      console.log(`Participantes adicionales seleccionados: ${participants.length} (mínimo requerido).`);
+    }
 
     if (!args.confirm) {
       console.log(`Disponible: ${args.date}, ${blocks.map((block) => block.range).join(", ")}.`);
@@ -226,7 +226,7 @@ async function main() {
     }
 
     console.log("Confirmación explícita recibida mediante --confirm. Creando reserva…");
-    for (const block of blocks) await configureBlock(page, args.date, block, args.participants);
+    for (const block of blocks) await configureBlock(page, args.date, block, participants);
     console.log(await finalize(page));
   } finally {
     await context.close();
