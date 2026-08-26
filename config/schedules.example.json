@@ -1,0 +1,23 @@
+{
+  "timezone": "America/Bogota",
+  "tasks": [
+    {
+      "id": "voley-sabado",
+      "enabled": true,
+      "run": {
+        "weekday": "THU",
+        "time": "06:00"
+      },
+      "reservation": {
+        "targetWeekday": "SAT",
+        "weeksAhead": 0,
+        "scenario": "Cancha de vóley playa en arenilla Unidad Deportiva Belén Rincón",
+        "division": "Completa",
+        "start": "13:00",
+        "end": "14:00",
+        "participantsCsv": "./data/participants.csv",
+        "confirm": false
+      }
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+[Unit]
+Description=Programador semanal de reservas SIMON INDER
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/simon-reservas
+EnvironmentFile=/opt/simon-reservas/.env
+ExecStart=/usr/bin/pnpm schedule
+Restart=always
+RestartSec=10
+User=simon-reservas
+
+[Install]
+WantedBy=multi-user.target
