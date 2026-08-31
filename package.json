@@ -5,8 +5,11 @@
   "type": "module",
   "description": "Automatización segura de reservas en SIMON 2.0 INDER mediante Playwright.",
   "scripts": {
-    "start": "node src/cli.mjs",
-    "check": "node --check src/cli.mjs && node --test"
+    "start": "node src/server.mjs",
+    "start:api": "node src/server.mjs",
+    "start:cli": "node src/cli.mjs",
+    "test": "npm run check",
+    "check": "node --check src/cli.mjs && node --check src/server.mjs && node --check src/request.mjs && node --check src/service.mjs && node --test"
   },
   "engines": {
     "node": ">=20"

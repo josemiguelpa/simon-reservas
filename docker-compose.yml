@@ -1,0 +1,15 @@
+services:
+  simon-reservas:
+    build: .
+    container_name: simon-reservas
+    environment:
+      HOST: ${HOST:-0.0.0.0}
+      PORT: ${PORT:-3000}
+      SIMON_DOCUMENT_TYPE: ${SIMON_DOCUMENT_TYPE:-Cédula de Ciudadanía}
+      SIMON_DOCUMENT_NUMBER: ${SIMON_DOCUMENT_NUMBER:?Falta SIMON_DOCUMENT_NUMBER en el entorno o .env}
+      SIMON_PASSWORD: ${SIMON_PASSWORD:?Falta SIMON_PASSWORD en el entorno o .env}
+      SIMON_ROLE: ${SIMON_ROLE:-}
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+    shm_size: "1gb"

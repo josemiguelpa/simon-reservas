@@ -1,37 +1,64 @@
-# Reservas SIMON INDER
+# simon-reservas
 
-Automatización de la interfaz web de [SIMON 2.0 INDER](https://simon.inder.gov.co/) con Playwright. Busca un escenario, selecciona su división, comprueba un bloque y, únicamente con `--confirm`, intenta crear la reserva.
-
-El flujo fue contrastado con la interfaz disponible el 26 de agosto de 2026. Como SIMON es un sistema externo, sus textos y estructura pueden cambiar.
+Servicio HTTP y CLI para automatizar reservas en SIMON 2.0 INDER con Playwright.
 
 ## Requisitos
 
 - Node.js 20 o posterior.
-- Una cuenta válida de SIMON.
-- Cumplir las reglas de uso y de reserva del INDER.
+- Credenciales válidas de SIMON en variables de entorno.
 
-## Instalación
-
-```bash
-npm install
-npx playwright install chromium
-cp .env.example .env
-```
-
-Completa `.env` localmente. El archivo está ignorado por Git:
+## Variables de entorno
 
 ```dotenv
 SIMON_DOCUMENT_TYPE=Cédula de Ciudadanía
 SIMON_DOCUMENT_NUMBER=TU_NUMERO_DE_DOCUMENTO
 SIMON_PASSWORD=TU_CONTRASENA
+# SIMON_ROLE=Nombre exacto del perfil
+
+HOST=0.0.0.0
+PORT=3000
 ```
 
-Si la contraseña contiene `#`, espacios u otros caracteres especiales, enciérrala entre comillas dobles. No se incluyen credenciales reales en este proyecto.
-
-## Comprobar disponibilidad sin reservar
+## Instalación local
 
 ```bash
-npm start -- \
+pnpm install
+npx playwright install chromium
+cp .env.example .env
+```
+
+## API HTTP
+
+```bash
+npm start
+```
+
+### Health
+
+```bash
+curl http://localhost:3000/health
+```
+
+### Validar
+
+```bash
+curl -X POST http://localhost:3000/reservas/validar \
+  -H 'content-type: application/json' \
+  -d '{"scenario":"Cancha polideportiva Carpinelo","division":"Completa","date":"2026-08-28","start":"18:00","end":"19:00","participants":["DOC2"],"confirm":false,"headed":false}'
+```
+
+### Reservar
+
+```bash
+curl -X POST http://localhost:3000/reservas \
+  -H 'content-type: application/json' \
+  -d '{"scenario":"Cancha polideportiva Carpinelo","division":"Completa","date":"2026-08-28","start":"18:00","end":"19:00","participants":["DOC2"],"confirm":true,"headed":false}'
+```
+
+## CLI
+
+```bash
+npm run start:cli -- \
   --scenario "Cancha polideportiva Carpinelo" \
   --division "Completa" \
   --date 2026-08-28 \
@@ -39,28 +66,25 @@ npm start -- \
   --end 19:00
 ```
 
-Este es el modo predeterminado. Inicia sesión, espera a que el calendario termine de cargar y comprueba todos los bloques incluidos en el rango. Por ejemplo, `12:00–14:00` valida por separado `12:00–13:00` y `13:00–14:00`. Se detiene sin guardar nada.
+Añade `--confirm` para crear la reserva real.
 
-## Crear la reserva
+## Docker
 
-Revisa escenario, división, fecha, horas y participantes. Después añade `--confirm`:
+### Con Docker Compose
 
 ```bash
-npm start -- \
-  --scenario "Cancha polideportiva Carpinelo" \
-  --division "Completa" \
-  --date 2026-08-28 \
-  --start 18:00 \
-  --end 19:00 \
-  --participants "DOCUMENTO_2,DOCUMENTO_3,DOCUMENTO_4" \
-  --confirm
+cp .env.example .env
+docker compose up --build
 ```
 
-El titular de la cuenta se añade automáticamente. `--participants` solo debe contener las cédulas de las personas adicionales, que deben existir en SIMON. Algunos escenarios exigen un mínimo de participantes; el programa lo comprueba antes de guardar.
+### Con `docker run`
 
-Usa `--headed` para ver el navegador durante la ejecución. Si el escenario requiere pago, formularios adicionales, CAPTCHA o aprobación manual, el programa se detiene: no intenta evadir controles ni automatiza pagos.
+```bash
+docker build -t simon-reservas .
+docker run --rm -p 3000:3000 --env-file .env simon-reservas
+```
 
-## Verificación del proyecto
+## Pruebas
 
 ```bash
 npm run check
@@ -68,8 +92,7 @@ npm run check
 
 ## Límites deliberados
 
-- No reserva en bucle ni sondea agresivamente la disponibilidad.
-- No llama endpoints privados directamente; utiliza la interfaz visible.
-- No guarda contraseñas, cookies ni perfiles del navegador.
-- No cancela reservas ni procesa pagos.
-- Una reserva real solo se intenta cuando se pasa `--confirm` explícitamente.
+- No automatiza pagos, CAPTCHA ni pasos manuales.
+- No guarda cookies, perfiles ni credenciales en el repositorio.
+- No reserva en bucle ni sondea agresivamente SIMON.
+- La reserva real solo ocurre con `confirm=true`.
