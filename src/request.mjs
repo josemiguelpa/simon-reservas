@@ -1,3 +1,4 @@
+import process from "node:process";
 import { assertIsoDate, time24ToMinutes, toTwelveHour } from "./utils.mjs";
 import { ValidationError } from "./errors.mjs";
 
@@ -22,7 +23,9 @@ export function normalizeReservationPayload(input) {
     end: input.end,
     participants: input.participants ?? [],
     confirm: input.confirm ?? false,
-    headed: input.headed ?? false,
+    // Deployments that provide a display (HEADED=true) default to a real browser
+    // window; an explicit headed value in the payload still wins.
+    headed: input.headed ?? process.env.HEADED === "true",
     requestId: input.requestId,
   };
 

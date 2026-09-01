@@ -2,6 +2,10 @@ services:
   simon-reservas:
     build: .
     container_name: simon-reservas
+    # xvfb-run waits on a USR1 signal from Xvfb before launching the command, and
+    # that wait never returns when it runs as PID 1. An init process fixes it and
+    # also forwards signals and reaps zombies for the browser subprocesses.
+    init: true
     environment:
       HOST: ${HOST:-0.0.0.0}
       PORT: ${PORT:-3000}
@@ -9,6 +13,7 @@ services:
       SIMON_DOCUMENT_NUMBER: ${SIMON_DOCUMENT_NUMBER:?Falta SIMON_DOCUMENT_NUMBER en el entorno o .env}
       SIMON_PASSWORD: ${SIMON_PASSWORD:?Falta SIMON_PASSWORD en el entorno o .env}
       SIMON_ROLE: ${SIMON_ROLE:-}
+      HEADED: ${HEADED:-true}
     ports:
       - "3000:3000"
     restart: unless-stopped
