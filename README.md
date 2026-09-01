@@ -41,6 +41,9 @@ curl http://localhost:3000/health
 
 ### Validar
 
+Consulta la disponibilidad sin reservar. El rango puede cubrir varios bloques.
+`confirm` se ignora en este endpoint: siempre es una simulación.
+
 ```bash
 curl -X POST http://localhost:3000/reservas/validar \
   -H 'content-type: application/json' \
@@ -54,6 +57,30 @@ curl -X POST http://localhost:3000/reservas \
   -H 'content-type: application/json' \
   -d '{"scenario":"Cancha polideportiva Carpinelo","division":"Completa","date":"2026-08-28","start":"18:00","end":"19:00","participants":["DOC2"],"confirm":true,"headed":false}'
 ```
+
+**Un bloque por request.** SIMON no permite reservar un segundo bloque con las
+mismas cédulas, así que con `confirm: true` el rango debe cubrir exactamente un
+bloque. Para reservar dos horas seguidas hay que enviar dos requests, cada uno
+con otra cuenta y otro conjunto de participantes.
+
+### Credenciales por request
+
+Por defecto se usan las variables `SIMON_*` del entorno. Para reservar con otra
+cuenta, envía `credentials` en el cuerpo (`documentType` y `role` son opcionales):
+
+```json
+{
+  "credentials": {
+    "documentNumber": "DOC",
+    "password": "CLAVE",
+    "documentType": "Cédula de Ciudadanía",
+    "role": "Ciudadano"
+  }
+}
+```
+
+Sirve el servicio solo sobre una red de confianza: las contraseñas viajan en el
+cuerpo del request.
 
 ## CLI
 

@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import process from "node:process";
 import { chromium } from "playwright";
-import { AvailabilityError, ValidationError } from "./errors.mjs";
+import { AvailabilityError, ReservationError, ValidationError } from "./errors.mjs";
 import { blocksCoveringRange, parseArgs, requiredOptions } from "./utils.mjs";
 
 const BASE_URL = "https://simon.inder.gov.co";
@@ -59,21 +59,48 @@ async function chooseAutocomplete(page, label, option) {
   await page.getByRole("option", { name: option, exact: true }).click();
 }
 
+// Dump what the browser actually saw when a step times out, so failures caused by
+// site changes or bot-manager challenges can be diagnosed without a live display.
+async function captureDebugSnapshot(page, name, secrets = []) {
+  const dir = process.env.DEBUG_DIR || "debug";
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const base = `${dir}/${stamp}-${name}`;
+
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    await page.screenshot({ path: `${base}.png`, fullPage: true });
+
+    let html = await page.content();
+    for (const secret of secrets.filter(Boolean)) html = html.split(secret).join("[REDACTED]");
+    fs.writeFileSync(`${base}.html`, html, "utf8");
+    console.log(`Snapshot de depuración guardado en ${base}.png / ${base}.html (url: ${page.url()})`);
+  } catch (error) {
+    console.log(`No se pudo guardar el snapshot de depuración: ${error.message}`);
+  }
+}
+
 async function waitForLoginForm(page) {
   await page.getByRole("combobox", { name: /tipo de documento/i }).waitFor({ state: "visible", timeout: 15_000 });
   await page.getByRole("textbox", { name: /número de documento/i }).waitFor({ state: "visible", timeout: 15_000 });
   await page.locator('input[type="password"]').waitFor({ state: "visible", timeout: 15_000 });
 }
 
-async function login(page) {
-  const documentType = process.env.SIMON_DOCUMENT_TYPE || "Cédula de Ciudadanía";
-  const documentNumber = process.env.SIMON_DOCUMENT_NUMBER;
-  const password = process.env.SIMON_PASSWORD;
+export function resolveCredentials(credentials = {}) {
+  const documentType = credentials.documentType || process.env.SIMON_DOCUMENT_TYPE || "Cédula de Ciudadanía";
+  const documentNumber = credentials.documentNumber || process.env.SIMON_DOCUMENT_NUMBER;
+  const password = credentials.password || process.env.SIMON_PASSWORD;
+  const role = credentials.role || process.env.SIMON_ROLE;
 
   if (!documentNumber || !password) {
-    throw new ValidationError("Define SIMON_DOCUMENT_NUMBER y SIMON_PASSWORD en .env o en el entorno.");
+    throw new ValidationError(
+      "Faltan credenciales: envía credentials.documentNumber y credentials.password, o define SIMON_DOCUMENT_NUMBER y SIMON_PASSWORD en el entorno.",
+    );
   }
 
+  return { documentType, documentNumber, password, role };
+}
+
+async function login(page, { documentType, documentNumber, password, role }) {
   await page.goto(LOGIN_URL, { waitUntil: "domcontentloaded" });
   await waitForLoginForm(page);
   await chooseAutocomplete(page, /tipo de documento/i, documentType);
@@ -87,9 +114,8 @@ async function login(page) {
     const roleInput = page.getByRole("combobox", { name: /perfil de seguridad/i });
     if (await roleInput.isVisible().catch(() => false)) {
       await roleInput.click();
-      const configuredRole = process.env.SIMON_ROLE;
-      const roleOption = configuredRole
-        ? page.getByRole("option", { name: configuredRole, exact: true })
+      const roleOption = role
+        ? page.getByRole("option", { name: role, exact: true })
         : page.getByRole("option").first();
       await roleOption.click();
       await page.getByRole("button", { name: "Ingresar", exact: true }).click();
@@ -157,6 +183,22 @@ async function inspectRequestedBlocks(page, { date, start, end }) {
   return blocks;
 }
 
+// After a block is saved SIMON opens a "Recuerda" modal telling the user to scroll
+// down and press Guardar. It overlays the page, so nothing else is clickable until
+// it is dismissed. It is not always shown, hence the tolerant wait.
+async function dismissReminderDialog(page) {
+  const dialog = page.getByRole("dialog", { name: "Recuerda" });
+
+  try {
+    await dialog.waitFor({ state: "visible", timeout: 5_000 });
+  } catch {
+    return;
+  }
+
+  await dialog.getByRole("button", { name: "Aceptar", exact: true }).click();
+  await dialog.waitFor({ state: "hidden", timeout: 10_000 });
+}
+
 async function configureBlock(page, date, block, participants) {
   const dayColumn = page.locator(`.fc-timegrid-col[data-date="${date}"]`);
   const calendarBlock = dayColumn.locator(".fc-event").filter({ hasText: block.range });
@@ -168,8 +210,9 @@ async function configureBlock(page, date, block, participants) {
   await page.getByRole("heading", { name: "Creación de Reserva" }).waitFor();
   for (const participant of participants) await addParticipant(page, participant);
 
-  await page.getByRole("button", { name: "Guardar", exact: true }).last().click();
+  await dialogSaveButton(page).click();
   await page.getByRole("heading", { name: "Creación de Reserva" }).waitFor({ state: "hidden", timeout: 10_000 });
+  await dismissReminderDialog(page);
 }
 
 async function addParticipant(page, documentNumber) {
@@ -197,28 +240,56 @@ async function verifyCapacity(page, addedParticipants) {
   }
 }
 
-async function finalize(page) {
-  await page.getByText("Bloques a Reservar", { exact: true }).waitFor({ timeout: 10_000 });
-  const finalSave = page.getByRole("button", { name: "Guardar", exact: true }).last();
-  await finalSave.click();
+// Two "Guardar" buttons coexist: the form's final save carries a save icon, while the
+// block dialog's plain one stays mounted but hidden in a portal after it is used.
+// Telling them apart by icon is stable; telling them apart by DOM order is not.
+const SAVE_ICON = '[data-testid="SaveIcon"]';
 
-  const success = page.getByText(/Se ha registrado la reserva exitosamente/i);
-  await success.waitFor({ timeout: 20_000 });
-  return (await success.first().innerText()).trim();
+function finalSaveButton(page) {
+  return page.getByRole("button", { name: "Guardar", exact: true }).filter({ has: page.locator(SAVE_ICON) });
+}
+
+function dialogSaveButton(page) {
+  return page.getByRole("button", { name: "Guardar", exact: true }).filter({ hasNot: page.locator(SAVE_ICON) });
+}
+
+async function finalize(page) {
+  // SIMON leaves no lasting confirmation in the DOM after the final save: the reservation
+  // is created, the URL does not change and any notice it shows is gone seconds later.
+  // The network response is the only durable signal, so the outcome is read from it.
+  const saved = page.waitForResponse(
+    (response) => response.request().method() === "POST" && response.url().startsWith(BASE_URL),
+    { timeout: 30_000 },
+  );
+
+  await finalSaveButton(page).click();
+  const response = await saved;
+  console.log(`Guardado final: HTTP ${response.status()} ${response.url()}`);
+
+  if (!response.ok()) {
+    throw new ReservationError(`SIMON rechazó la reserva (HTTP ${response.status()}).`, 502, "SIMON_REJECTED");
+  }
+
+  return "Reserva registrada en SIMON.";
 }
 
 export async function executeReservation(payload) {
+  const credentials = resolveCredentials(payload.credentials);
   const browser = await chromium.launch({ headless: !payload.headed });
   const context = await browser.newContext({ locale: "es-CO", timezoneId: "America/Bogota" });
   const page = await context.newPage();
+  let step = "login";
 
   try {
     console.log(payload.requestId ? `[${payload.requestId}] Iniciando sesión en SIMON…` : "Iniciando sesión en SIMON…");
-    await login(page);
+    await login(page, credentials);
     console.log(`Buscando escenario: ${payload.scenario}`);
+    step = "open-scenario";
     await openScenario(page, payload.scenario);
+    step = "choose-division";
     await chooseAutocomplete(page, "Selecciona la división a reservar", payload.division);
 
+    step = "inspect-blocks";
     const blocks = await inspectRequestedBlocks(page, payload);
     await verifyCapacity(page, payload.participants.length);
 
@@ -234,8 +305,20 @@ export async function executeReservation(payload) {
       };
     }
 
+    // SIMON refuses a second block booked with the same participant documents, so a
+    // multi-block range has to be split into one request per block and per account.
+    if (blocks.length !== 1) {
+      throw new ValidationError(
+        `SIMON solo permite reservar un bloque por cuenta y conjunto de cédulas. El rango ${payload.start}-${payload.end} cubre ${blocks.length} bloques (${blocks
+          .map((block) => block.range)
+          .join(", ")}); envía un request por bloque.`,
+      );
+    }
+
     console.log("Confirmación explícita recibida. Creando reserva…");
-    for (const block of blocks) await configureBlock(page, payload.date, block, payload.participants);
+    step = "configure-block";
+    await configureBlock(page, payload.date, blocks[0], payload.participants);
+    step = "finalize";
     const message = await finalize(page);
 
     return {
@@ -247,6 +330,9 @@ export async function executeReservation(payload) {
         blocks,
       },
     };
+  } catch (error) {
+    await captureDebugSnapshot(page, step, [credentials.password, credentials.documentNumber]);
+    throw error;
   } finally {
     await context.close();
     await browser.close();

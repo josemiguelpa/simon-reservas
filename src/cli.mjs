@@ -14,6 +14,10 @@ Opciones:
   --confirm                 Confirma la reserva real. Sin esto solo valida.
   --help                    Muestra esta ayuda.
 
+Nota: SIMON solo permite reservar un bloque por cuenta y conjunto de cédulas.
+Con --confirm el rango debe cubrir exactamente un bloque; para varios bloques
+repite el comando por bloque con otra cuenta y otras cédulas.
+
 Credenciales requeridas en .env:
   SIMON_DOCUMENT_NUMBER, SIMON_PASSWORD
 `);

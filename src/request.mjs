@@ -10,6 +10,33 @@ function isBoolean(value) {
   return typeof value === "boolean";
 }
 
+// SIMON rejects a second block booked with the same participant documents, so each
+// request may carry its own account. Falls back to the process credentials.
+function normalizeCredentials(input) {
+  if (input === undefined || input === null) return undefined;
+
+  if (typeof input !== "object" || Array.isArray(input)) {
+    throw new ValidationError("credentials debe ser un objeto.");
+  }
+
+  if (!isNonEmptyString(input.documentNumber) || !isNonEmptyString(input.password)) {
+    throw new ValidationError("credentials requiere documentNumber y password como cadenas no vacías.");
+  }
+
+  for (const name of ["documentType", "role"]) {
+    if (input[name] !== undefined && !isNonEmptyString(input[name])) {
+      throw new ValidationError(`credentials.${name} debe ser una cadena no vacía cuando se envía.`);
+    }
+  }
+
+  return {
+    documentNumber: input.documentNumber.trim(),
+    password: input.password,
+    documentType: isNonEmptyString(input.documentType) ? input.documentType.trim() : undefined,
+    role: isNonEmptyString(input.role) ? input.role.trim() : undefined,
+  };
+}
+
 export function normalizeReservationPayload(input) {
   if (!input || typeof input !== "object" || Array.isArray(input)) {
     throw new ValidationError("El cuerpo debe ser un objeto JSON.");
@@ -68,5 +95,6 @@ export function normalizeReservationPayload(input) {
     confirm: payload.confirm,
     headed: payload.headed,
     requestId: typeof payload.requestId === "string" ? payload.requestId.trim() : undefined,
+    credentials: normalizeCredentials(input.credentials),
   };
 }
