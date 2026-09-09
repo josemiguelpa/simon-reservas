@@ -70,6 +70,51 @@ mismas cédulas, así que con `confirm: true` el rango debe cubrir exactamente u
 bloque. Para reservar dos horas seguidas hay que enviar dos requests, cada uno
 con otra cuenta y otro conjunto de participantes.
 
+Una reserva confirmada devuelve el radicado y el estado con que quedó registrada:
+
+```json
+{
+  "ok": true,
+  "message": "Reserva registrada en SIMON (radicado 20260000140854, Pendiente de Aprobación).",
+  "data": {
+    "available": true,
+    "reserved": true,
+    "blocks": [{ "range": "6:00 - 7:00", "available": true }],
+    "booking": {
+      "id": 437886,
+      "filedCode": "20260000140854",
+      "status": "PENDIENTE_APROBACION",
+      "statusName": "Pendiente de Aprobación",
+      "scenario": "Cancha de vóley playa N 1 Unidad Deportiva Atanasio Girardot",
+      "createdAt": "2026-09-08T19:28:08.610Z"
+    }
+  }
+}
+```
+
+### Cómo se confirma que la reserva quedó
+
+SIMON no deja confirmación durable en el DOM, y el estado HTTP de su guardado no
+es confiable: puede responder con error aunque la reserva se haya creado. Por eso
+el guardado se registra solo como diagnóstico y el resultado se verifica contra el
+seguimiento de reservas, `GET /api/scenarios-booking/list` de
+`api-simon.inder.gov.co`, consultando el día solicitado con los estados
+`PENDIENTE_APROBACION` y `APROBADO`.
+
+Detalles que condicionan esa verificación:
+
+- La API se autentica con un bearer de NextAuth que nunca llega a `localStorage`.
+  El token se toma del tráfico que hace la propia aplicación tras el login.
+- Una petición desde la página es bloqueada por CORS, así que la consulta se hace
+  con el contexto de peticiones de Playwright, fuera del navegador.
+- El parámetro `status` es obligatorio en la práctica: sin él la API responde 200
+  con una lista vacía.
+- El seguimiento no expone la hora del bloque (las fechas llegan a medianoche
+  UTC), así que la reserva se identifica por fecha y por haber sido creada después
+  del guardado; las cédulas solo desempatan cuando hay varias candidatas.
+- El listado se consulta durante unos segundos, porque la fila no siempre aparece
+  en la primera lectura.
+
 ### Credenciales por request
 
 Por defecto se usan las variables `SIMON_*` del entorno. Para reservar con otra
@@ -102,7 +147,8 @@ Todas tienen la forma `{"ok":false,"errorCode":"…","message":"…"}`.
 | 400 | `INVALID_JSON` | El cuerpo no es JSON válido. |
 | 404 | `NOT_FOUND` | Ruta inexistente. |
 | 409 | `NOT_AVAILABLE` | Algún bloque del rango ya está ocupado. |
-| 502 | `SIMON_REJECTED` | SIMON respondió con error al guardar la reserva. |
+| 502 | `SIMON_REJECTED` | La reserva no apareció en el seguimiento de SIMON tras guardarla. |
+| 502 | `VERIFICATION_UNAVAILABLE` | No se capturó el token de sesión, así que la reserva no pudo verificarse. |
 | 500 | `INTERNAL_ERROR` | Cualquier otro fallo, normalmente un timeout de Playwright. |
 
 ## Diagnóstico de fallos

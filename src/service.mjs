@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import process from "node:process";
+import { setTimeout as sleep } from "node:timers/promises";
 import { chromium } from "playwright";
 import { AvailabilityError, ReservationError, ValidationError } from "./errors.mjs";
 import { blocksCoveringRange, parseArgs, requiredOptions } from "./utils.mjs";
@@ -7,6 +8,19 @@ import { blocksCoveringRange, parseArgs, requiredOptions } from "./utils.mjs";
 const BASE_URL = "https://simon.inder.gov.co";
 const LOGIN_URL = `${BASE_URL}/login/`;
 const BOOKING_LIST_URL = `${BASE_URL}/apps/scenarios/booking/list/`;
+const API_BASE_URL = "https://api-simon.inder.gov.co";
+const BOOKING_LIST_API = `${API_BASE_URL}/api/scenarios-booking/list`;
+
+// The tracking endpoint only returns rows when a status filter is supplied: the same
+// query without `status` answers HTTP 200 with an empty array. These are the states a
+// freshly created reservation can land in.
+const CREATED_STATUSES = ["PENDIENTE_APROBACION", "APROBADO"];
+
+// SIMON stamps BOOKING_CREATED_DATE server-side, so allow for clock drift between it
+// and this process before treating a row as "created before we pressed save".
+const CLOCK_SKEW_MS = 5 * 60_000;
+const VERIFY_ATTEMPTS = 6;
+const VERIFY_INTERVAL_MS = 2_000;
 
 export function loadEnvFile(path = ".env") {
   if (!fs.existsSync(path)) return;
@@ -253,24 +267,144 @@ function dialogSaveButton(page) {
   return page.getByRole("button", { name: "Guardar", exact: true }).filter({ hasNot: page.locator(SAVE_ICON) });
 }
 
-async function finalize(page) {
-  // SIMON leaves no lasting confirmation in the DOM after the final save: the reservation
-  // is created, the URL does not change and any notice it shows is gone seconds later.
-  // The network response is the only durable signal, so the outcome is read from it.
-  const saved = page.waitForResponse(
-    (response) => response.request().method() === "POST" && response.url().startsWith(BASE_URL),
-    { timeout: 30_000 },
-  );
+// The SPA authenticates against the API with a NextAuth bearer token that never reaches
+// localStorage, so the session can only be reused by lifting the header off the traffic
+// the app makes itself (GET /api/auth/menu carries it right after login).
+function watchAuthToken(page) {
+  let token = null;
 
-  await finalSaveButton(page).click();
-  const response = await saved;
-  console.log(`Guardado final: HTTP ${response.status()} ${response.url()}`);
+  page.on("request", (request) => {
+    if (!request.url().startsWith(API_BASE_URL)) return;
+    const header = request.headers().authorization;
+    if (header) token = header;
+  });
+
+  return () => token;
+}
+
+async function fetchBookings(context, authorization, { date, status }) {
+  const query = new URLSearchParams({ start: date, end: date, status });
+  // A fetch issued from inside the page is rejected by CORS; the API request context
+  // rides the same session while staying outside the browser's fetch stack.
+  const response = await context.request.get(`${BOOKING_LIST_API}?${query}`, {
+    headers: { Authorization: authorization, Accept: "application/json" },
+    timeout: 15_000,
+  });
 
   if (!response.ok()) {
-    throw new ReservationError(`SIMON rechazó la reserva (HTTP ${response.status()}).`, 502, "SIMON_REJECTED");
+    throw new Error(`El seguimiento de reservas respondió HTTP ${response.status()}.`);
   }
 
-  return "Reserva registrada en SIMON.";
+  const body = await response.json();
+  return Array.isArray(body.bookings) ? body.bookings : [];
+}
+
+export function normalizeDocuments(value) {
+  return [...new Set(String(value ?? "").split(",").map((item) => item.trim()).filter(Boolean))].sort().join(",");
+}
+
+// The tracking payload carries no time of day — BOOKING_START_DATE and BOOKING_END_DATE
+// are both midnight UTC — so a row cannot be matched by block. Date plus a creation
+// stamp later than the save click is what identifies the reservation; the participant
+// documents only break ties, because a stricter rule would report a real booking as
+// failed if SIMON ever reshapes that field.
+function matchesReservation(booking, { date, createdAfter }) {
+  if (!String(booking.BOOKING_START_DATE ?? "").startsWith(date)) return false;
+
+  const created = Date.parse(booking.BOOKING_CREATED_DATE);
+  return !Number.isFinite(created) || created >= createdAfter;
+}
+
+export function pickReservation(bookings, criteria) {
+  const candidates = bookings.filter((booking) => matchesReservation(booking, criteria));
+  if (!candidates.length) return null;
+
+  const expected = normalizeDocuments([criteria.applicant, ...criteria.participants].join(","));
+  return (
+    candidates.find((booking) => normalizeDocuments(booking.PARTICIPANT_IDENTIFICATION_NUMBER) === expected) ??
+    candidates[0]
+  );
+}
+
+// The row does not always appear on the first read, so the tracking list is polled for a
+// few seconds before the reservation is declared lost.
+async function findCreatedReservation(context, authorization, criteria) {
+  let lastError = null;
+
+  for (let attempt = 0; attempt < VERIFY_ATTEMPTS; attempt += 1) {
+    if (attempt) await sleep(VERIFY_INTERVAL_MS);
+
+    for (const status of CREATED_STATUSES) {
+      try {
+        const bookings = await fetchBookings(context, authorization, { date: criteria.date, status });
+        const match = pickReservation(bookings, criteria);
+        if (match) return match;
+      } catch (error) {
+        lastError = error;
+      }
+    }
+  }
+
+  if (lastError) console.log(`Última falla consultando el seguimiento: ${lastError.message}`);
+  return null;
+}
+
+async function finalize(page, context, payload, authorization, applicant) {
+  // SIMON leaves no lasting confirmation in the DOM after the final save, and its
+  // response status is not trustworthy either — it can answer with an error while the
+  // reservation was in fact created. So the POST is logged for diagnostics only and the
+  // booking-tracking API is used as the authoritative outcome.
+  const saved = page
+    .waitForResponse(
+      (response) => response.request().method() === "POST" && response.url().startsWith(BASE_URL),
+      { timeout: 30_000 },
+    )
+    .catch(() => null);
+
+  const savedAt = Date.now();
+  await finalSaveButton(page).click();
+  const response = await saved;
+  console.log(
+    response
+      ? `Guardado final: HTTP ${response.status()} ${response.url()}`
+      : "Guardado final: no se observó respuesta POST.",
+  );
+
+  if (!authorization) {
+    throw new ReservationError(
+      "No se capturó el token de sesión de SIMON, así que no se pudo verificar la reserva en el seguimiento.",
+      502,
+      "VERIFICATION_UNAVAILABLE",
+    );
+  }
+
+  console.log("Verificando la reserva en el seguimiento de SIMON…");
+  const booking = await findCreatedReservation(context, authorization, {
+    date: payload.date,
+    participants: payload.participants,
+    applicant,
+    createdAfter: savedAt - CLOCK_SKEW_MS,
+  });
+
+  if (!booking) {
+    throw new ReservationError(
+      `SIMON no registró la reserva: no aparece en el seguimiento del ${payload.date} con estado ${CREATED_STATUSES.join(" ni ")}.`,
+      502,
+      "SIMON_REJECTED",
+    );
+  }
+
+  return {
+    message: `Reserva registrada en SIMON (radicado ${booking.BOOKING_FILED_CODE}, ${booking.BOOKING_STATUS_NAME}).`,
+    booking: {
+      id: booking.SCENARY_BOOKING_PK,
+      filedCode: booking.BOOKING_FILED_CODE,
+      status: booking.BOOKING_STATUS_CODE,
+      statusName: booking.BOOKING_STATUS_NAME,
+      scenario: booking.SCENARY_NAME,
+      createdAt: booking.BOOKING_CREATED_DATE,
+    },
+  };
 }
 
 export async function executeReservation(payload) {
@@ -278,6 +412,7 @@ export async function executeReservation(payload) {
   const browser = await chromium.launch({ headless: !payload.headed });
   const context = await browser.newContext({ locale: "es-CO", timezoneId: "America/Bogota" });
   const page = await context.newPage();
+  const authToken = watchAuthToken(page);
   let step = "login";
 
   try {
@@ -319,7 +454,7 @@ export async function executeReservation(payload) {
     step = "configure-block";
     await configureBlock(page, payload.date, blocks[0], payload.participants);
     step = "finalize";
-    const message = await finalize(page);
+    const { message, booking } = await finalize(page, context, payload, authToken(), credentials.documentNumber);
 
     return {
       ok: true,
@@ -328,6 +463,7 @@ export async function executeReservation(payload) {
         available: true,
         reserved: true,
         blocks,
+        booking,
       },
     };
   } catch (error) {
