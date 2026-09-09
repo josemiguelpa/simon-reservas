@@ -94,12 +94,17 @@ Una reserva confirmada devuelve el radicado y el estado con que quedó registrad
 
 ### Cómo se confirma que la reserva quedó
 
-SIMON no deja confirmación durable en el DOM, y el estado HTTP de su guardado no
-es confiable: puede responder con error aunque la reserva se haya creado. Por eso
-el guardado se registra solo como diagnóstico y el resultado se verifica contra el
-seguimiento de reservas, `GET /api/scenarios-booking/list` de
-`api-simon.inder.gov.co`, consultando el día solicitado con los estados
-`PENDIENTE_APROBACION` y `APROBADO`.
+SIMON no deja confirmación durable en el DOM y su estado HTTP no dice nada: un
+rechazo llega como `200` con un arreglo `errors` en el cuerpo. El resultado se lee
+entonces de la red, en dos pasos:
+
+1. `POST /api/scenarios-booking` explica el rechazo. Si el cuerpo trae `errors`,
+   la reserva se reporta como fallida con el texto del propio SIMON (por ejemplo,
+   «El Integrante … se encuentra vinculado a otra reserva activa para el tipo de
+   escenario …»).
+2. Si no hubo errores, la reserva se confirma contra el seguimiento,
+   `GET /api/scenarios-booking/list`, consultando el día solicitado con los
+   estados `PENDIENTE_APROBACION` y `APROBADO`.
 
 Detalles que condicionan esa verificación:
 
@@ -114,6 +119,21 @@ Detalles que condicionan esa verificación:
   del guardado; las cédulas solo desempatan cuando hay varias candidatas.
 - El listado se consulta durante unos segundos, porque la fila no siempre aparece
   en la primera lectura.
+- El seguimiento incluye las reservas donde la cuenta figura como participante,
+  no solo las que solicitó.
+- `BOOKING_CREATED_DATE` trae hora de Bogotá con sufijo `Z`. Leerla como UTC deja
+  la reserva cinco horas en el pasado, así que la comprobación acepta ambas
+  lecturas y sigue sirviendo si SIMON corrige el sufijo.
+- El guardado puede responder `500` con la reserva igualmente creada: por eso el
+  seguimiento, y no el estado HTTP, es lo que decide.
+
+SIMON restringe por **tipo** de escenario, no por escenario: una persona vinculada
+a una reserva activa de vóley playa no puede aparecer en otra reserva de vóley
+playa, aunque sea otra cancha, y da igual si en la primera figura como
+participante y no como solicitante.
+
+Para ver el intercambio con la API durante una corrida, define `DEBUG_NETWORK=1`:
+se registra cada llamada que no sea `GET`, con su estado y el inicio del cuerpo.
 
 ### Credenciales por request
 
@@ -147,7 +167,7 @@ Todas tienen la forma `{"ok":false,"errorCode":"…","message":"…"}`.
 | 400 | `INVALID_JSON` | El cuerpo no es JSON válido. |
 | 404 | `NOT_FOUND` | Ruta inexistente. |
 | 409 | `NOT_AVAILABLE` | Algún bloque del rango ya está ocupado. |
-| 502 | `SIMON_REJECTED` | La reserva no apareció en el seguimiento de SIMON tras guardarla. |
+| 502 | `SIMON_REJECTED` | SIMON rechazó el guardado (el mensaje incluye su explicación) o la reserva no apareció en el seguimiento. |
 | 502 | `VERIFICATION_UNAVAILABLE` | No se capturó el token de sesión, así que la reserva no pudo verificarse. |
 | 500 | `INTERNAL_ERROR` | Cualquier otro fallo, normalmente un timeout de Playwright. |
 

@@ -9,7 +9,8 @@ const BASE_URL = "https://simon.inder.gov.co";
 const LOGIN_URL = `${BASE_URL}/login/`;
 const BOOKING_LIST_URL = `${BASE_URL}/apps/scenarios/booking/list/`;
 const API_BASE_URL = "https://api-simon.inder.gov.co";
-const BOOKING_LIST_API = `${API_BASE_URL}/api/scenarios-booking/list`;
+const BOOKING_SAVE_API = `${API_BASE_URL}/api/scenarios-booking`;
+const BOOKING_LIST_API = `${BOOKING_SAVE_API}/list`;
 
 // The tracking endpoint only returns rows when a status filter is supplied: the same
 // query without `status` answers HTTP 200 with an empty array. These are the states a
@@ -19,6 +20,11 @@ const CREATED_STATUSES = ["PENDIENTE_APROBACION", "APROBADO"];
 // SIMON stamps BOOKING_CREATED_DATE server-side, so allow for clock drift between it
 // and this process before treating a row as "created before we pressed save".
 const CLOCK_SKEW_MS = 5 * 60_000;
+
+// That stamp is Bogotá wall-clock time labelled with a "Z" suffix, so parsing it as UTC
+// puts a booking five hours in the past — enough to discard the reservation just made.
+// Both readings are accepted so the check survives SIMON fixing the suffix.
+const BOGOTA_UTC_OFFSET_MS = 5 * 60 * 60_000;
 const VERIFY_ATTEMPTS = 6;
 const VERIFY_INTERVAL_MS = 2_000;
 
@@ -282,6 +288,20 @@ function watchAuthToken(page) {
   return () => token;
 }
 
+// Opt-in trace of the calls the app makes to its API, for diagnosing a save that SIMON
+// rejects without surfacing anything in the page.
+function traceApiCalls(page) {
+  if (!process.env.DEBUG_NETWORK) return;
+
+  page.on("response", async (response) => {
+    const request = response.request();
+    if (request.method() === "GET" || !response.url().startsWith(API_BASE_URL)) return;
+
+    const body = await response.text().catch(() => "");
+    console.log(`API ${request.method()} ${response.url()} → ${response.status()} ${body.slice(0, 500)}`);
+  });
+}
+
 async function fetchBookings(context, authorization, { date, status }) {
   const query = new URLSearchParams({ start: date, end: date, status });
   // A fetch issued from inside the page is rejected by CORS; the API request context
@@ -312,7 +332,9 @@ function matchesReservation(booking, { date, createdAfter }) {
   if (!String(booking.BOOKING_START_DATE ?? "").startsWith(date)) return false;
 
   const created = Date.parse(booking.BOOKING_CREATED_DATE);
-  return !Number.isFinite(created) || created >= createdAfter;
+  if (!Number.isFinite(created)) return true;
+
+  return created >= createdAfter || created + BOGOTA_UTC_OFFSET_MS >= createdAfter;
 }
 
 export function pickReservation(bookings, criteria) {
@@ -349,14 +371,30 @@ async function findCreatedReservation(context, authorization, criteria) {
   return null;
 }
 
+// SIMON answers a rejected save with HTTP 200 and an `errors` array, so the status code
+// says nothing; the reason lives in the body.
+async function readSaveErrors(response) {
+  if (!response) return [];
+
+  try {
+    const body = await response.json();
+    return (Array.isArray(body.errors) ? body.errors : [])
+      .map((error) => error.Error_Desc)
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
 async function finalize(page, context, payload, authorization, applicant) {
-  // SIMON leaves no lasting confirmation in the DOM after the final save, and its
-  // response status is not trustworthy either — it can answer with an error while the
-  // reservation was in fact created. So the POST is logged for diagnostics only and the
-  // booking-tracking API is used as the authoritative outcome.
+  // SIMON leaves no lasting confirmation in the DOM after the final save, so the outcome
+  // is read from the network: the save response explains a rejection, and the
+  // booking-tracking API is what actually proves the reservation exists.
   const saved = page
     .waitForResponse(
-      (response) => response.request().method() === "POST" && response.url().startsWith(BASE_URL),
+      (response) =>
+        response.request().method() === "POST" &&
+        new URL(response.url()).href.split("?")[0] === BOOKING_SAVE_API,
       { timeout: 30_000 },
     )
     .catch(() => null);
@@ -367,8 +405,13 @@ async function finalize(page, context, payload, authorization, applicant) {
   console.log(
     response
       ? `Guardado final: HTTP ${response.status()} ${response.url()}`
-      : "Guardado final: no se observó respuesta POST.",
+      : "Guardado final: no se observó respuesta de la API.",
   );
+
+  const errors = await readSaveErrors(response);
+  if (errors.length) {
+    throw new ReservationError(`SIMON rechazó la reserva: ${errors.join(" ")}`, 502, "SIMON_REJECTED");
+  }
 
   if (!authorization) {
     throw new ReservationError(
@@ -413,6 +456,7 @@ export async function executeReservation(payload) {
   const context = await browser.newContext({ locale: "es-CO", timezoneId: "America/Bogota" });
   const page = await context.newPage();
   const authToken = watchAuthToken(page);
+  traceApiCalls(page);
   let step = "login";
 
   try {

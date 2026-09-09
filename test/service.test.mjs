@@ -40,6 +40,21 @@ test("descarta reservas de otra fecha", () => {
   assert.equal(pickReservation([other], criteria), null);
 });
 
+// Datos reales de la corrida del 2026-09-08: SIMON reportó la reserva recién creada
+// como "2026-09-08T21:49:26.167Z" mientras el proceso estaba en 2026-09-09T02:49:20Z,
+// porque el campo trae hora de Bogotá con sufijo "Z".
+test("reconoce la reserva pese al sufijo Z sobre hora de Bogotá", () => {
+  const savedAt = Date.parse("2026-09-09T02:49:20.000Z");
+  const created = booking({
+    SCENARY_BOOKING_PK: 437959,
+    BOOKING_FILED_CODE: "20260000140927",
+    BOOKING_CREATED_DATE: "2026-09-08T21:49:26.167Z",
+  });
+
+  const match = pickReservation([created], { ...criteria, createdAfter: savedAt - 5 * 60_000 });
+  assert.equal(match?.BOOKING_FILED_CODE, "20260000140927");
+});
+
 test("descarta reservas creadas antes del guardado", () => {
   const previous = booking({ BOOKING_CREATED_DATE: "2026-09-01T10:00:00.000Z" });
   assert.equal(pickReservation([previous], criteria), null);
